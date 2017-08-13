@@ -1,0 +1,719 @@
+---
+title: "Multilevel II Lab"
+author: "ICPSR Summer Program 2017"
+output: 
+  html_document:
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require("knitr")
+opts_knit$set(root.dir ="C:\\Users\\mgiordan\\git\\Multilevel_II_Rworkshop_ICPSR2017")
+```
+
+
+TODO:
+
+* bootstrap se's (bootstrap mer for lme4?)
+
+* https://cran.r-project.org/web/packages/sjPlot/vignettes/sjplmer.html for SJPlot
+
+* Difference in differences
+
+* Other built in data sets (sleepstudy in lme4?)
+
+
+
+# Setting up the workspace
+
+The first step is that we will load all the packages needed. We are going to be using the 'haven' package and the 'brms' package.
+
+**Notes on the packages**
+
+* 'haven': This package is used to read in data that is native to Sas, Stata, or SPSS. 
+
+* 'brms': Used to run the multiple membership model. In general, 'brms' is a package. 
+which makes running bayesian models in Stan much easier. The syntax for mixed models in 'brms' is similar to model syntax in lme4. The machinery behind brms is Stan, and therefore C++. **Important: this means that you will also need to install a C++ compiler** if you do not already have one. R-tools for windows will do the trick. 
+
+```{r, include = FALSE}
+# used for loading stata dataset
+# pulled this out...put it back?
+#library('haven')
+```
+
+```{r libraries, message=FALSE, warning=FALSE }
+# Fits multilevel models
+library("nlme")
+# Also fits multilevel models
+library("lme4")
+# Adds p-values to lme4
+library("lmerTest")
+# Used for algorithms
+library('optimx')
+# bootstrapping
+library("boot")
+# Useful for ploting
+library("sjPlot")
+library("sjmisc")
+library("sjlabelled")
+# Canned Rstan models (needed for the multiple membership example)
+library("brms")
+# tidyverse
+library("tidyverse")
+```
+
+Next we set the working directory. You need to specify the folder path from  YOUR computer. More specifically use the folder path where the data is stored. 
+
+```{r paths, eval=FALSE}
+# Enter the folder path on your computer
+setwd('C:/enter/the/folderpath/on/your/computer')
+```
+
+# 1. Basic Linear model
+
+We are going to be using a longitudinal example. After reading in the data, we can print the dimensions of the dataset to see if it has the expected number of rows and columns. 
+
+```{r linear_read_data, cache = TRUE}
+# Reading in the data
+chapman <- readRDS("longitudinal_chapman.rds")
+# Checking the dataset
+dim(chapman)
+
+```
+
+
+Next we print a random subset of 10 rows just so we can look at the data.
+```{r linear_look_data, cache = TRUE, echo = FALSE}
+# Set a seed and randomly sample from rows 1-1000.
+# The random sample here isn't important, only useful for displaying data.
+set.seed(872017)
+rand <- sample(unique(chapman$id),2)
+# Print the randomly sampled rows
+kable(head(chapman[chapman$id %in% rand,], n = 10))
+```
+
+The important variables here are:
+
+* **id**: This is our clustering variable. 
+
+* **Score**: An individual's score on an opposites naming task. The specific task is not super relevant here, but more info is in the codebook. Score is going to be our DV. 
+
+* **Week**: This is our discrete measure of time. Values range from 0-3.
+
+
+## Plot Score vs. Time (by individuals)
+Let's briefly look at the data visually. I have randomly sampled 10 individuals and plotted their scores over time. Looks like evidence of random slopes and random intercepts. Note that 'facet_wrap()' is a useful feature of ggplot, allowing us make plots by specific individuals. 
+
+```{r Linear_plot_slopes, cache= TRUE}
+# Randomly sample 10 id's
+set.seed(111111111)
+rand <-sample(unique(chapman$id), 10)
+
+# Plot those 10 id's individually over time. 
+ggplot(data = chapman[chapman$id %in% rand,], aes(x=week, y = score)) +
+  geom_point() +
+  ylim(50, 300)+
+  geom_smooth(method='lm',formula=y~x) +
+  facet_wrap("id")
+
+```
+
+## Fitting models in a frequentist framework
+
+We are going to use the 'lmer()' function from the 'lme4' package. First I will fit a random effects anova model. Often use to get the ICC. 
+
+$$score_{ij} = \gamma_{00} + u_{0j} + r_{ij}$$
+
+Note that I am calling the 'lmer()' function as 'lme4::lmer()'. Both 'lme4' and 'lmerTest' use the 'lmer()' function. We have both packages loaded and R will default to using the function from the last loaded package. One way to make sure R doesn't get confused is to add the package name before the function, as I am doing below.
+
+```{r longitudinal_reanova, cache=TRUE}
+# Fitting the model
+fit_m0 <- lme4::lmer(score ~ 1 + (1 | id),
+                     data      = chapman,
+                     REML      = FALSE,
+                     na.action = na.omit)
+
+# Printing the model summary
+summary(fit_m0)
+
+# Printing the ICC
+tau2      <- 574.3
+sigma2    <- 1583.7
+ICC       <- tau2/(sigma2 +tau2)
+paste("The ICC is:", round(ICC, 3))
+```
+Let's fit a few more models...Let's see if there is an effect of week. This model would look like:
+
+$$score_{ij} = \gamma_{00} + \gamma_{01}Week_{ij} + u_{0j} + r_{ij}$$
+
+```{r, cache = TRUE}
+# Fitting a conditional model
+fit_m1 <- lme4::lmer(score ~ 1 + week + (1 | id),
+                     data      = chapman,
+                     REML      = FALSE,
+                     na.action = na.omit)
+# summarize model
+summary(fit_m1)
+```
+
+But wait, where are the p-values? Well lme4, doesn't compute p-values. For those desperate for a p-value or a test that a paramter is different than zero, we can either bootstrap them, run the model with the "lmerTest" package, which will add p-values, or we could turn to the "nlme" package which runs multilevel models and does compute p-values.
+
+Note: testing if variance parameters are different than zero is not straight-forward. I recommend against it, or do your reading!
+
+```{r standard_errs, cache=TRUE}
+# Bootstrap Standard errors with the 'boot' library
+b_par<-bootMer(x=fit_m1,FUN=fixef,nsim=500)
+boot.ci(b_par,type="perc", index=1)
+boot.ci(b_par,type="perc", index=2)
+
+# Or we could bootstrap with the 'confint' function
+confint.merMod(fit_m1, parm=c(3,4), method = "boot", nsim = 500, boot.type = "perc")
+
+# Or we could fit the model with "lmerTest::lmer()" 
+# which uses the same syntax as 'lmer()'
+fit_m1 <- lmerTest::lmer(score ~ 1 + week + (1 | id),
+                         data      =chapman,
+                         REML      = FALSE,
+                         na.action = na.omit)
+# summarize model
+summary(fit_m1)
+```
+
+Lets add a random slope and use a likelihood ratio test to see if the random slope significant improves model fit.
+
+$$score_{ij} = \gamma_{00} + \gamma_{01}Week_{ij} + u_{0j} + u_{1j}Week_{ij} + r_{ij}$$
+
+```{r}
+# Adding a random slope for week
+fit_m2 <- lme4::lmer(score ~ 1 + week + (1 + week | id),
+                     data      = chapman,
+                     REML      = FALSE,
+                     na.action = na.omit)
+summary(fit_m2)
+
+# LR test for comparing model 1 vs model 2
+anova(fit_m1, fit_m2)
+```
+
+
+
+## Other things we can do
+### Plotting. 
+```{r, cache = TRUE}
+# Plotting the random intercepts and slopes
+sjp.lmer(fit_m2, 
+         type       = "re",
+         facet.grid = FALSE,
+         #sort.est  = "sort.all",
+         y.offset   = .4)
+sjp.lmer(fit_m2, 
+         type       = "re",
+         facet.grid = FALSE,
+         sort.est   = "sort.all",
+         y.offset   = .4)
+
+# Pulling out the random intercepts
+ranef(fit_m2)
+
+# Plot random slopes and random intercepts simultaneously
+sjp.lmer(fit_m2, 
+         type = "rs.ri")
+```
+
+Or if you are feeling saucy maybe you want to save values and do have more flexibilty with your plotting. For example, we could take all of the predicted values, and plot them in ggplot2. Maybe we then feed it into plotly to get more of an interactive plot. Get creative!
+
+```{r plotly1, cache = TRUE}
+# adding in the predicted scores
+chapman <- as.data.frame(cbind(chapman, predict(fit_m1), predict(fit_m2)))
+
+# Plotting m1 with fixed slopes
+p1 <- ggplot(data =chapman, aes(x=week, y=predict(fit_m1), 
+                               color = factor(id), group = factor(id))) +
+      geom_point() +
+      geom_line()
+# Plotting m2 with randome slopes
+p2 <-ggplot(data =chapman, aes(x=week, y=predict(fit_m2), 
+                               color = factor(id), group = factor(id))) +
+            geom_point() +
+            geom_line()
+
+plotly::ggplotly(p1)
+plotly::ggplotly(p2)
+```
+
+
+### uncorrelated random effects
+
+```{r uncor_ranef, cache=TRUE}
+fit_m2 <- lmer(score ~ 1 + week + (1 | id) + (-1 + week|id),
+               data      = chapman,
+               REML      = FALSE,
+               na.action = na.omit)
+summary(fit_m2)
+
+```
+
+### optimizers
+
+In many cases you might decide you want to adjust your optimizer
+
+https://cran.r-project.org/web/packages/lme4/vignettes/lmerperf.html
+
+https://www.rdocumentation.org/packages/lme4/versions/1.1-13/topics/lmerControl
+
+```{r optimizers, cache=TRUE}
+# Model with default optimizer
+fit_m2 <- lmer(score ~ 1 + week + (1 + week | id),
+               data      = chapman,
+               REML      = FALSE,
+               na.action = na.omit,
+               control   = lmerControl(optimizer = "bobyqa"))
+summary(fit_m2)
+
+# adding the 'nloptwrap' optimizer
+fit_m2 <- lmer(score ~ 1 + week + (1 + week | id),
+               data      = chapman,
+               REML      = FALSE,
+               na.action = na.omit,
+               control   = lmerControl(optimizer = "nloptwrap"))
+summary(fit_m2)
+
+# The 'optimx' package has more optimzers. Here I use the 'nlminb' optimizer
+fit_m2 <- lmer(score ~ 1 + week + (1 + week | id),
+               data       = chapman,
+               REML       = FALSE,
+               na.action  = na.omit,
+               control    = lmerControl(optimizer = "optimx", calc.derivs = FALSE,
+                                        optCtrl    = list(method = "nlminb", 
+                                        starttests = FALSE, kkt = FALSE)))
+summary(fit_m2)
+
+```
+
+### Autocorrelation (use 'nlme' instead of 'lme4')
+
+While the lme4 package has some great features. It also has some disadvantages-- one disadvantage is that it is not very good for adding in auto-correlation. For that we will use the 'nlme' package which makes it much easier to specify autocorrelation
+
+For more info on possible correlation strucures available in 'nlme'
+
+https://stat.ethz.ch/R-manual/R-devel/library/nlme/html/corClasses.html
+
+```{r}
+# Fitting the same random slopes model - NO autocorrelation
+# Note that I have specified missing data actions and an optimizer
+fit_m2_nlme <- lme(score ~ 1 + week, random = ~ 1+week|id,
+                    data      = chapman,
+                    na.action ="na.omit",
+                    control   = lmeControl(opt='optim')) # defaults to 'nlminb'
+summary(fit_m2_nlme)
+
+# Adding an autoregressive process of order 1.
+fit_m2AR_nlme <- lme(score ~ 1 + week, random = ~ 1+week|id,
+                     data        =chapman,
+                     na.action   ="na.omit",
+                     control     = lmeControl(opt='optim'),
+                     correlation = corAR1())
+summary(fit_m2AR_nlme)
+# adding an autoregressive moving average process
+# p and q arguments are arbitrary here. I'd think more deeply about
+# how you want to specify those
+fit_m2AR_nlme <- lme(score ~ 1 + week, random = ~ 1+week|id,
+                     data        = chapman,
+                     na.action   ="na.omit",
+                     control     = lmeControl(opt='optim'),
+                     correlation = corARMA(p=1,q=1))
+summary(fit_m2AR_nlme)
+
+#Does the ARMA autocorrelation improve model fit?
+anova(fit_m2_nlme, fit_m2AR_nlme)
+
+
+```
+
+## Fitting in bayesian
+
+For the sake of time I am going to skip to the random slopes model, and show how we might fit this in a bayesian framework. To do this is R is actually rather simple. So simple, we could just use the exact same lme4 code with the 'brm()' function instead of 'lmer()'. Just like this.
+
+```{r bayes_noargsshown, eval=FALSE}
+# Fitting the brms model
+fit_m0b <- brm(score ~ 1 + week + (1 + week | id), 
+               data = chapman)
+```
+
+But this may be a bit naive, because the 'brm()' function has many built in defaults (priors, burnin/warmup iterations, sampling iterations, chains, etc). Below, is the exact same model, but I have made some of the important defaults explicit.
+
+```{r longitudinal_brms, cache = TRUE}
+# Fitting the brms model
+fit_m2b <- brm(score ~ 1 + week + (1 + week | id), 
+               data    = chapman,
+               prior   = NULL,
+               autocor = NULL,
+               chains  = 4,
+               iter    = 2000,
+               warmup  = 1000)
+summary(fit_m2b)
+```
+
+Plotting the posterior distrubtions and the effects is especially useful here
+
+```{r, cache=TRUE}
+# plotting paramters
+plot(fit_m2b)
+stanplot(fit_m2b)
+```
+
+That correlation looks different than zero in the posterior distributions but equal to zero in the effects plots? Turns out its just because we are mixing up parameters with very different scales. Lets plot just the correlation effect.
+
+```{r corplot, cache=TRUE}
+stanplot(fit_m2b, pars = "cor_id")
+
+```
+
+
+
+### Priors
+I'm mostly taking a pass on priors, because I'm not particularly savy with Bayesian methods. 
+
+* Gelman A. (2006). Prior distributions for variance parameters in hierarchical models. Bayesian analysis, 1(3), 515 - 534. 
+
+* https://github.com/stan-dev/stan/wiki/Prior-Choice-Recommendations 
+
+
+
+```{r longitudinal_brms_withprior, cache = TRUE}
+# Fitting the brms model
+fit_m2b_priors <- brm(score ~ 1 + week + (1 + week | id),
+                      data    = chapman,
+                      prior   = set_prior(prior = "normal(0,10)",
+                                          class = "b"),
+                      autocor = NULL,
+                      chains  = 4,
+                      iter    = 2000,
+                      warmup  = 1000
+                      )
+```
+
+
+```{r, cache=TRUE}
+summary(fit_m2b_priors)
+# plotting paramters
+plot(fit_m2b_priors)
+stanplot(fit_m2b_priors)
+
+```
+
+### autocorrelations
+
+```{r bayes_autocorrelation, cache=TRUE}
+# Fitting the brms model
+fit_m2b_AR <- brm(score ~ 1 + week + (1 | id),
+                  data    = chapman,
+                  prior   = set_prior(prior = "normal(0,10)",
+                                      class = "b"),
+                  autocor = cor_ar(~week|id, p=1), # Adding an AR 1 process here
+                  chains  = 4,
+                  iter    = 2000,
+                  warmup  = 1000
+                  )
+
+```
+
+
+# 2. Binary Outcomes
+
+```{r nonlinear_read_data}
+# Reading in the data
+thai <- readRDS('binary_thai.rds')
+# Checking the dataset
+dim(thai)
+```
+
+```{r nonlinear_look_data, cache = TRUE, echo = FALSE}
+# Set a seed and randomly sample from rows.
+# The random sample here isn't important, only useful for displaying data.
+set.seed(81111)
+rand <- sample(unique(thai$schoolid),1)
+temp <- thai[thai$schoolid %in% rand,]
+
+# Print the randomly sampled rows
+kable(temp[sample(nrow(temp), 10),])
+  
+```
+
+Some of the variables we are going to use are
+
+* **schoolid** This is our clustering variable. Students are nested within schools
+
+* **pped** This is a binary indicator of whether or not a student had pre-primary education. 
+
+* **male** binary variable for gender
+
+* **msesc** Mean SES of school
+
+```{r, cache=TRUE}
+# Fitting a null model
+fit_m0 <- glmer(pped ~ 1+ (1 |schoolid),
+                family                 = "binomial", 
+                data                   = thai,
+                glmerControl(optimizer = "bobyqa"))
+summary(fit_m0)
+
+# Adding predictors and random slopes
+fit_m1 <- glmer(pped~1+male+ msesc+ (1+male|schoolid),
+                family                 = "binomial", 
+                data                   = thai,
+                glmerControl(optimizer ="bobyqa"))
+summary(fit_m1)
+
+#putting confidence intervals around effects
+confint(fit_m1, parm = "beta_", method="Wald") 
+# Odds ratios instead of log-odds
+exp(fixef(fit_m1))
+
+```
+
+###Optimizers:
+Optimizers are not as good in R. In fact, I think they are fairly limited from what I have seen. For example, the default number of adaptive quadrature points is 1 (which is equivalent to laplace approximation). We can up the number of quadrature points, but only if our models only have a random intercept. Any additional random slopes and the nADQ cannot be more than 1.
+
+```{r, cache = TRUE}
+fit <-glmer(pped~1+male+msesc +(1|schoolid),
+            family                 = "binomial", 
+            data                   = thai,
+            nAGQ                   = 5, 
+            glmerControl(optimizer ="bobyqa"))
+```
+
+But as soon as we add a random slope this model will not run.
+
+```{r,eval = FALSE, cache = TRUE}
+fit <- glmer(pped~1+male+msesc +(1+male|schoolid),
+             family                 ="binomial", 
+             data                   =thai,
+             nAGQ                   = 5, 
+             glmerControl(optimizer ="bobyqa"))
+```
+
+As we did before we can change the optimizer to 'nloptwrap'.
+
+```{r, cache=TRUE}
+fit <- glmer(pped~1+male+msesc +(1+male|schoolid),
+             family       ="binomial", 
+             data         =thai,
+             nAGQ         = 1, 
+             glmerControl = lmerControl(optimizer = "nloptwrap"))
+
+```
+
+
+## Binary with 'brms'
+```{r, cache=TRUE, warning=FALSE, }
+fit <- brm(pped ~ 1 + male + msesc + (1|schoolid),
+           family = "binomial", 
+           data   = thai,
+           chains = 2)
+summary(fit)
+
+plot(fit)
+stanplot(fit)
+```
+
+# 3. Cross Classified
+
+* http://lme4.r-forge.r-project.org/book/Ch2.pdf
+
+```{r}
+data("Penicillin")
+dim(Penicillin)
+head(Penicillin)
+```
+
+## Description of the data
+The data are described in Davies and Goldsmith (1972) as coming from an investigation to "assess the variability between samples of penicillin by the B. subtilis method. In this test method a bulk-inoculated nutrient agar medium is poured into a Petri dish of approximately 90 mm. diameter, known as a plate. When the medium has set, six small hollow cylinders or pots (about 4 mm. in diameter) are cemented onto the surface at equally spaced intervals. A few drops of the penicillin solutions to be compared are placed in the respective cylinders, and the whole plate is placed in an incubator for a given time. Penicillin diffuses from the pots into the agar, and this produces a clear circular zone of inhibition of growth of the organisms, which can be readily measured. The diameter of the zone is related in a known way to the concentration of penicillin in the solution."
+
+```{r pen_plot ,cache = TRUE}
+p3 <- ggplot(data = Penicillin, aes(y=diameter, x=plate, color = sample, group = sample)) +
+       geom_point()+
+       geom_line()
+
+plotly::ggplotly(p3)
+
+```
+
+## Frequentist
+
+```{r, cache=TRUE}
+fit <- lme4::lmer(diameter ~ 1 + (1|plate) + (1|sample),
+                  data      = Penicillin,
+                  REML      = FALSE,
+                  na.action = na.omit,
+                  control   = lmerControl(optimizer = "bobyqa"))
+summary(fit)
+```
+
+
+## Bayesian
+
+```{r, cache=TRUE}
+fit <- brm(diameter ~ 1 + (1|plate) + (1|sample),
+            data   = Penicillin,
+            warmup = 5000,
+            iter   = 10000)
+summary(fit)
+plot(fit)
+stanplot(fit)
+```
+
+
+From BRMS Whenever you see the warning "There were x divergent transitions after warmup." you should really think about increasing adapt_delta. To do this, write control = list(adapt_delta = <x>), where <x> should usually be value between 0.8 (current default) and 1. Increasing adapt_delta will slow down the sampler but will decrease the number of divergent transitions threatening the validity of your posterior samples.
+
+
+```{r, cache=TRUE}
+fit <- brm(diameter ~ 1 + (1|plate) + (1|sample),
+            data    = Penicillin,
+            warmup  = 5000,
+            iter    = 10000,
+            control = list(adapt_delta = .99))
+summary(fit)
+plot(fit)
+stanplot(fit)
+```
+
+But I couldn't get this one to run without any errors :/
+
+
+## Another example
+
+```{r, cache = TRUE}
+cross <- read.csv("C:/users/mgiordan/desktop/crossclassified.csv")
+dim(cross)
+
+kable(head(cross))
+```
+
+```{r}
+fit <- lme4::glmer(outcome ~ 1 + (1|state) + (1|policy),
+                   family = "binomial",
+                   data   = cross)
+summary(fit)
+
+fit <- lme4::glmer(outcome ~ 1 + time + (1|state) + (1|policy),
+                   family = "binomial",
+                   data   = cross)
+summary(fit)
+```
+
+```{r, eval=FALSE}
+fit <- lme4::glmer(outcome ~ 1 + citi_ideo + legprofess + popdens +
+                   diffus + ideodist + ideo_zero + dem + time +
+                   (1|state) + (1|policy),
+                   family = "binomial",
+                   data   = cross)
+```
+
+
+### Briefly on other count models
+
+I don't have data to show for these but I thought I'd share general syntax if you were to do some count models. Notice for poisson we only change the family argument. 
+
+```{r, eval = FALSE}
+# poisson
+fit <- lme4::glmer(y ~ 1 + x1 + x2 + (1 | groupvar),
+                   family = "poisson",
+                   data = mydata)
+
+```
+
+Negative binomial might be possible, but you could be better off in something like stata too...
+
+**Note from the lme4 package:** "Parts of glmer.nb() are still experimental and methods are still missing or suboptimal. In particular, there is no inference available for the dispersion parameter 
+??
+, yet."
+
+```{r, eval = FALSE}
+# Negative binomial
+fit <- lme4::glmer.nb(y ~ 1 + x1 + x2 + (1 | groupvar)
+                      data = mydata)
+
+```
+
+The 'brms' package also supports a large number of distributions and link functions for the response variable.
+
+**see section on 'brmsfamily': **https://cran.r-project.org/web/packages/brms/brms.pdf
+
+# 4. Multiple Membership
+
+```{r read_nurses}
+# Reading in the data
+nurses <- readRDS("mm_nursing.rds")
+```
+
+\newpage
+
+## Describing the variables and data
+
+Checking the dimensions of the dataset we have 1000 cases and 66 variables
+
+```{r}
+# Checking the dataset
+dim(nurses)
+```
+
+I am going to subset only the variables of interest
+
+```{r}
+nurses <- nurses[, c("patient", "satis", "assess", 
+                     "n1st", "n2nd", "n3rd", "n4th",
+                     "p1st", "p2nd", "p3rd", "p4th")]
+```
+
+and we can print some of the raw data to see what it looks like
+
+```{r}
+# Set a seed and randomly sample from rows 1-1000.
+# The random sample here isn't important, only useful for displaying data.
+set.seed(872017)
+randomRows <- sample(1:1000,10)
+# Print the randomly sampled rows
+kable(head(nurses[randomRows,], n = 10))
+```
+
+**Variables**
+
+* patient: and id for patients 
+* satis: a satisfacation score 
+* assess: an assessment score 
+* n1-n4: ID's for the 1st through 4th nurses who tended patient 
+* p1-p4: the proportion of time spent with each nurse 
+
+So the general idea for this model is that each individual patient is nested within multiple nurses...which is a multiple membership model! We are going to weight the effect of each nurse by the proportion of time spent with each nurse. 
+
+\newpage
+
+## Fitting the multiple membership model with 'brms'
+
+Unfortunately, our usual multilevel modeling packages such as 'lme4' and 'nlme', cannot fit multiple membership models. So we turn to the bayesian package 'brms' which makes fitting these in R possible. I am using defaults for priors, chains, and I am setting the burn-in and iteration. If you would like to change these or do not know what these are I suggest reading some of the documentation for 'brms'.
+
+```{r fitting_brm, cache=TRUE}
+# model syntax
+# This will spit out lots of information about the model fitting process
+fit_mm <- brm(satis ~ 1 + assess + (1 | mm(n1st, n2nd, n3rd, n4th, 
+                                           weights = cbind(p1st, p2nd, p3rd, p4th))),
+              data   = nurses,
+              warmup = 5000,
+              iter   = 10000)
+# Printing the model parameters
+summary(fit_mm)
+```
+
+\newpage
+
+## Plotting the results
+
+```{r, cache=TRUE}
+# Plotting results
+plot(fit_mm)
+stanplot((fit_mm))
+```
+
+
